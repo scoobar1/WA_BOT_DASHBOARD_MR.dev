@@ -15,19 +15,17 @@ interface WhatsAppLog {
   phoneNumber: string
   incomingMessage: string
   botReply: string
-  timestamp: Date | string
-}
-
-interface Stats {
-  total: number
-  badWords: number
-  positive: number
-  today: number
+  timestamp: Date
 }
 
 interface ConversationsResponse {
   conversations: WhatsAppLog[]
-  stats: Stats
+  stats: {
+    total: number
+    badWords: number
+    positive: number
+    today: number
+  }
   pagination: {
     limit: number
     offset: number
@@ -39,7 +37,7 @@ export function LogsManagementWidget() {
   const [logs, setLogs] = useState<WhatsAppLog[]>([])
   const [searchTerm, setSearchTerm] = useState("")
   const [isLoading, setIsLoading] = useState(true)
-  const [stats, setStats] = useState<Stats>({
+  const [stats, setStats] = useState({
     total: 0,
     badWords: 0,
     positive: 0,
@@ -47,6 +45,7 @@ export function LogsManagementWidget() {
   })
   const [socket, setSocket] = useState<Socket | null>(null)
 
+  // Fetch initial data
   useEffect(() => {
     const fetchInitialData = async () => {
       setIsLoading(true)
@@ -74,7 +73,7 @@ export function LogsManagementWidget() {
     fetchInitialData()
 
     const apiUrl = process.env.NEXT_PUBLIC_BOT_SERVER_URL || "http://localhost:3001"
-    const socketConnection: Socket = io(apiUrl)
+    const socketConnection = io(apiUrl)
     setSocket(socketConnection)
 
     socketConnection.on("conversationUpdate", (newConversation: WhatsAppLog) => {
@@ -85,23 +84,21 @@ export function LogsManagementWidget() {
         ...prevStats,
         total: prevStats.total + 1,
         today:
-          new Date(conv.timestamp).toDateString() === new Date().toDateString()
+          conv.timestamp.toDateString() === new Date().toDateString()
             ? prevStats.today + 1
             : prevStats.today,
+        // لاحظ: badWords و positive تحتاج من السيرفر للحساب الصحيح
       }))
     })
 
-    socketConnection.on(
-      "conversationsData",
-      (data: { conversations: WhatsAppLog[]; stats: Stats }) => {
-        const conversationsWithDates = data.conversations.map((conv) => ({
-          ...conv,
-          timestamp: new Date(conv.timestamp),
-        }))
-        setLogs(conversationsWithDates)
-        setStats(data.stats)
-      }
-    )
+    socketConnection.on("conversationsData", (data: { conversations: WhatsAppLog[]; stats: any }) => {
+      const conversationsWithDates = data.conversations.map((conv) => ({
+        ...conv,
+        timestamp: new Date(conv.timestamp),
+      }))
+      setLogs(conversationsWithDates)
+      setStats(data.stats)
+    })
 
     return () => {
       socketConnection.disconnect()
@@ -121,11 +118,11 @@ export function LogsManagementWidget() {
       const apiUrl = process.env.NEXT_PUBLIC_BOT_SERVER_URL || "http://localhost:3001"
       const searchParam = searchTerm ? `?search=${encodeURIComponent(searchTerm)}` : ""
       const response = await fetch(`${apiUrl}/api/conversations/export${searchParam}`)
-      const data: WhatsAppLog[] = await response.json()
+      const data = await response.json()
 
       const csvContent = [
         ["Phone Number", "Incoming Message", "Bot Reply", "Timestamp"],
-        ...data.map((log) => [
+        ...data.map((log: WhatsAppLog) => [
           log.phoneNumber,
           `"${log.incomingMessage.replace(/"/g, '""')}"`,
           `"${log.botReply.replace(/"/g, '""')}"`,
@@ -167,6 +164,7 @@ export function LogsManagementWidget() {
       </CardHeader>
 
       <CardContent className="space-y-4">
+        {/* Search */}
         <div className="relative">
           <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
           <Input
@@ -177,6 +175,8 @@ export function LogsManagementWidget() {
           />
         </div>
 
+       
+        {/* Stats Grid */}
         <div className="flex justify-between p-4 bg-gray-900 rounded-lg text-center">
           <div className="flex-1">
             <p className="text-lg font-semibold text-white">{stats.total ?? 0}</p>
@@ -196,6 +196,7 @@ export function LogsManagementWidget() {
           </div>
         </div>
 
+        {/* Table */}
         <div className="border border-gray-700 rounded-lg bg-black">
           <ScrollArea className="h-96">
             {isLoading ? (
@@ -230,9 +231,7 @@ export function LogsManagementWidget() {
                           </div>
                         </div>
                       </TableCell>
-                      <TableCell className="text-sm text-gray-300">
-                        {format(new Date(log.timestamp), "MMM dd, HH:mm")}
-                      </TableCell>
+                      <TableCell className="text-sm text-gray-300">{format(log.timestamp, "MMM dd, HH:mm")}</TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
