@@ -1,445 +1,252 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useMemo } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Badge } from "@/components/ui/badge"
-import { QrCode, RefreshCw, CheckCircle, Wifi, Smartphone, Play, Pause, Square, AlertCircle } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { io } from "socket.io-client"
-import QRCodeLib from "qrcode"
+import { Input } from "@/components/ui/input"
+import { ScrollArea } from "@/components/ui/scroll-area"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { Download, Search, MessageSquare, ArrowRight } from "lucide-react"
+import { format } from "date-fns"
+import { io, Socket } from "socket.io-client"
 
-export function QRCodeWidget() {
-  const [qrCode, setQrCode] = useState<string | null>(null)
-  const [qrImageUrl, setQrImageUrl] = useState<string | null>(null)
-  const [isConnected, setIsConnected] = useState(false)
-  const [deviceInfo, setDeviceInfo] = useState<{ name: string; phone: string; platform: string } | null>(null)
-  const [socket, setSocket] = useState<any>(null)
-  const [connectionStatus, setConnectionStatus] = useState<"connecting" | "connected" | "disconnected">("connecting")
-  const [isRefreshing, setIsRefreshing] = useState(false)
-  const [showLoading, setShowLoading] = useState(true)
-  const [isPaused, setIsPaused] = useState(false)
-  const [botStatus, setBotStatus] = useState<"starting" | "ready" | "paused" | "stopped" | "error">("starting")
-  const [statusMessage, setStatusMessage] = useState("Starting bot...")
-  const [uptime, setUptime] = useState(0)
-  const [hasRefreshedOnDeviceInfo, setHasRefreshedOnDeviceInfo] = useState(false)
+interface WhatsAppLog {
+  id: string
+  phoneNumber: string
+  incomingMessage: string
+  botReply: string
+  timestamp: Date
+}
 
-  const generateQRImage = async (qrText: string) => {
-    try {
-      const url = await QRCodeLib.toDataURL(qrText, {
-        width: 256,
-        margin: 2,
-        color: {
-          dark: "#1f2937",
-          light: "#ffffff",
-        },
-      })
-      setQrImageUrl(url)
-      setShowLoading(false)
-    } catch (error) {
-      console.error("[QR Widget] Error generating QR image:", error)
-    }
+interface ConversationsResponse {
+  conversations: WhatsAppLog[]
+  stats: {
+    total: number
+    badWords: number
+    positive: number
+    today: number
   }
-
-  const updateStatusMessage = (connected: boolean, paused: boolean, uptime: number) => {
-    if (!connected) {
-      setBotStatus("starting")
-      setStatusMessage("Waiting for WhatsApp connection...")
-    } else if (paused) {
-      setBotStatus("paused")
-      setStatusMessage("Bot is paused - not responding to messages")
-    } else {
-      setBotStatus("ready")
-      const hours = Math.floor(uptime / 3600)
-      const minutes = Math.floor((uptime % 3600) / 60)
-      setStatusMessage(`Bot is running normally - Uptime: ${hours}h ${minutes}m`)
-    }
+  pagination: {
+    limit: number
+    offset: number
+    hasMore: boolean
   }
+}
 
+export function LogsManagementWidget() {
+  const [logs, setLogs] = useState<WhatsAppLog[]>([])
+  const [searchTerm, setSearchTerm] = useState("")
+  const [isLoading, setIsLoading] = useState(true)
+  const [stats, setStats] = useState({
+    total: 0,
+    badWords: 0,
+    positive: 0,
+    today: 0,
+  })
+  const [socket, setSocket] = useState<Socket | null>(null)
+
+  // Fetch initial data
   useEffect(() => {
-    const serverUrl = process.env.NEXT_PUBLIC_BOT_SERVER_URL || "http://localhost:3001"
-    console.log("[QR Widget] Establishing socket connection to:", serverUrl)
+    const fetchInitialData = async () => {
+      setIsLoading(true)
+      try {
+        const apiUrl = process.env.NEXT_PUBLIC_BOT_SERVER_URL || "http://localhost:3001"
+        const response = await fetch(`${apiUrl}/api/conversations?limit=100&offset=0`)
+        const data: ConversationsResponse = await response.json()
 
-    const socketConnection = io(serverUrl, {
-      transports: ["websocket", "polling"],
-      reconnection: true,
-      reconnectionDelay: 2000,
-      reconnectionAttempts: 3,
-      timeout: 10000,
-      forceNew: true,
+        const conversationsWithDates = data.conversations.map((conv) => ({
+          ...conv,
+          timestamp: new Date(conv.timestamp),
+        }))
+
+        setLogs(conversationsWithDates)
+        setStats(data.stats)
+      } catch (err) {
+        console.error(err)
+        setLogs([])
+        setStats({ total: 0, badWords: 0, positive: 0, today: 0 })
+      } finally {
+        setIsLoading(false)
+      }
+    }
+
+    fetchInitialData()
+
+    const apiUrl = process.env.NEXT_PUBLIC_BOT_SERVER_URL || "http://localhost:3001"
+    const socketConnection: Socket = io(apiUrl, {
+      transports: ["websocket"], // ✅ مهم لـ Vercel
     })
+
     setSocket(socketConnection)
 
-    socketConnection.on("connect", () => {
-      console.log("[QR Widget] Socket connected:", socketConnection.id)
-      setConnectionStatus("connected")
-      socketConnection.emit("getBotStatus")
+    socketConnection.on("conversationUpdate", (newConversation: WhatsAppLog) => {
+      const conv = { ...newConversation, timestamp: new Date(newConversation.timestamp) }
+      setLogs((prev) => [conv, ...prev.slice(0, 999)])
+
+      setStats((prevStats) => ({
+        ...prevStats,
+        total: prevStats.total + 1,
+        today:
+          conv.timestamp.toDateString() === new Date().toDateString()
+            ? prevStats.today + 1
+            : prevStats.today,
+      }))
     })
 
-    socketConnection.on("disconnect", (reason) => {
-      console.log("[QR Widget] Socket disconnected:", reason)
-      setConnectionStatus("disconnected")
-      setShowLoading(true)
-      setBotStatus("error")
-      setStatusMessage("Connection to server lost")
-      setHasRefreshedOnDeviceInfo(false)
+    socketConnection.on("conversationsData", (data: { conversations: WhatsAppLog[]; stats: any }) => {
+      const conversationsWithDates = data.conversations.map((conv) => ({
+        ...conv,
+        timestamp: new Date(conv.timestamp),
+      }))
+      setLogs(conversationsWithDates)
+      setStats(data.stats)
     })
-
-    socketConnection.on("qr", (qr: string) => {
-      console.log("[QR Widget] QR code received")
-      setQrCode(qr)
-      setIsConnected(false)
-      setShowLoading(false)
-      generateQRImage(qr)
-      setBotStatus("starting")
-      setStatusMessage("Scan QR code to connect")
-      setHasRefreshedOnDeviceInfo(false)
-    })
-
-    socketConnection.on(
-      "botStatus",
-      (status: {
-        isConnected: boolean
-        qrCode: string | null
-        deviceInfo?: { name: string; phone: string; platform: string }
-        isPaused?: boolean
-        uptime?: number
-      }) => {
-        console.log("[QR Widget] Bot status received:", status)
-
-        setIsConnected(status.isConnected)
-        setIsPaused(status.isPaused || false)
-        setUptime(status.uptime || 0)
-
-        if (status.deviceInfo && !hasRefreshedOnDeviceInfo && !deviceInfo) {
-          console.log("[QR Widget] Device info received, performing one-time refresh:", status.deviceInfo)
-          setHasRefreshedOnDeviceInfo(true)
-          setTimeout(() => {
-            socketConnection.emit("getBotStatus")
-          }, 1000)
-        }
-
-        if (status.deviceInfo) setDeviceInfo(status.deviceInfo)
-
-        if (status.qrCode && !status.isConnected) {
-          setQrCode(status.qrCode)
-          generateQRImage(status.qrCode)
-        } else if (status.isConnected) {
-          setQrCode(null)
-          setQrImageUrl(null)
-          setShowLoading(false)
-        }
-
-        updateStatusMessage(status.isConnected, status.isPaused || false, status.uptime || 0)
-      },
-    )
-
-    const pollInterval = setInterval(() => {
-      if (socketConnection.connected) {
-        socketConnection.emit("getBotStatus")
-      }
-    }, 5000)
-
-    const uptimeInterval = setInterval(() => {
-      if (isConnected && !isPaused) {
-        setUptime((prev) => {
-          const newUptime = prev + 1
-          updateStatusMessage(isConnected, isPaused, newUptime)
-          return newUptime
-        })
-      }
-    }, 1000)
 
     return () => {
-      console.log("[QR Widget] Cleaning up socket connection")
-      clearInterval(pollInterval)
-      clearInterval(uptimeInterval)
       socketConnection.disconnect()
     }
   }, [])
 
-  const handleRefresh = () => {
-    if (socket) {
-      setIsRefreshing(true)
-      setShowLoading(true)
-      setBotStatus("starting")
-      setStatusMessage("Restarting bot...")
-      socket.emit("requestBotRestart")
-      setQrCode(null)
-      setQrImageUrl(null)
-      setIsConnected(false)
-      setDeviceInfo(null)
-      setHasRefreshedOnDeviceInfo(false)
-      setTimeout(() => setIsRefreshing(false), 2000)
-    }
-  }
-
-  const handleResetSession = () => {
-    if (socket) {
-      setShowLoading(true)
-      setBotStatus("starting")
-      setStatusMessage("Resetting session...")
-      setQrCode(null)
-      setQrImageUrl(null)
-      setIsConnected(false)
-      setDeviceInfo(null)
-      setHasRefreshedOnDeviceInfo(false)
-      socket.emit("resetSession")
-    }
-  }
-
-  const handlePauseResume = () => {
-    if (socket) {
-      if (isPaused) {
-        socket.emit("resumeBot")
-        setBotStatus("ready")
-        setStatusMessage("Resuming bot...")
-      } else {
-        socket.emit("pauseBot")
-        setBotStatus("paused")
-        setStatusMessage("Pausing bot...")
-      }
-      setIsPaused(!isPaused)
-    }
-  }
-
-  const getStatusBadge = () => {
-    if (connectionStatus === "disconnected") {
-      return (
-        <Badge
-          variant="secondary"
-          className="font-medium shadow-lg transition-all duration-300"
-          style={{
-            backgroundColor: "rgba(239, 68, 68, 0.15)",
-            color: "#dc2626",
-            borderColor: "rgba(239, 68, 68, 0.4)",
-            border: "1px solid",
-          }}
-        >
-          <AlertCircle className="w-3 h-3 mr-1.5" />
-          Disconnected
-        </Badge>
-      )
-    }
-
-    if (!isConnected) {
-      return (
-        <Badge
-          variant="secondary"
-          className="font-medium shadow-lg transition-all duration-300"
-          style={{
-            backgroundColor: "rgba(245, 158, 11, 0.15)",
-            color: "#d97706",
-            borderColor: "rgba(245, 158, 11, 0.4)",
-            border: "1px solid",
-          }}
-        >
-          <QrCode className="w-3 h-3 mr-1.5" />
-          Scan Required
-        </Badge>
-      )
-    }
-
-    if (isPaused) {
-      return (
-        <Badge
-          variant="secondary"
-          className="font-medium shadow-lg transition-all duration-300"
-          style={{
-            backgroundColor: "rgba(249, 115, 22, 0.15)",
-            color: "#ea580c",
-            borderColor: "rgba(249, 115, 22, 0.4)",
-            border: "1px solid",
-          }}
-        >
-          <Pause className="w-3 h-3 mr-1.5" />
-          Paused
-        </Badge>
-      )
-    }
-
-    return (
-      <Badge
-        variant="secondary"
-        className="font-medium shadow-lg transition-all duration-300"
-        style={{
-          backgroundColor: "rgba(37, 211, 102, 0.15)",
-          color: "#25D366",
-          borderColor: "rgba(37, 211, 102, 0.4)",
-          border: "1px solid",
-        }}
-      >
-        <Wifi className="w-3 h-3 mr-1.5" />
-        Connected
-      </Badge>
+  const filteredLogs = useMemo(() => {
+    return logs.filter((log) =>
+      log.phoneNumber.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      log.incomingMessage.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      log.botReply.toLowerCase().includes(searchTerm.toLowerCase())
     )
-  }
+  }, [logs, searchTerm])
 
-  if (connectionStatus === "connecting" || (connectionStatus === "disconnected" && !qrImageUrl) || showLoading) {
-    return (
-      <Card className="bg-card border-border shadow-xl">
-        <CardHeader className="pb-4">
-          <CardTitle className="text-lg font-semibold text-card-foreground flex items-center gap-2">
-            <QrCode className="w-5 h-5 text-blue-500" />
-            WhatsApp Connection
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="flex flex-col items-center gap-6 py-8">
-          <div className="relative">
-            <div className="w-16 h-16 border-4 border-green-400/40 border-t-green-500 rounded-full animate-spin shadow-lg" />
-            <div className="absolute inset-0 w-16 h-16 border-4 border-green-400/20 rounded-full animate-ping" />
-            <div className="absolute inset-0 w-16 h-16 bg-green-400/10 rounded-full animate-pulse" />
-          </div>
-          <p className="text-muted-foreground text-center font-medium">{statusMessage}</p>
-        </CardContent>
-      </Card>
-    )
+  const downloadLogs = async () => {
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_BOT_SERVER_URL || "http://localhost:3001"
+      const searchParam = searchTerm ? `?search=${encodeURIComponent(searchTerm)}` : ""
+      const response = await fetch(`${apiUrl}/api/conversations/export${searchParam}`)
+      const data = await response.json()
+
+      const csvContent = [
+        ["Phone Number", "Incoming Message", "Bot Reply", "Timestamp"],
+        ...data.map((log: WhatsAppLog) => [
+          log.phoneNumber,
+          `"${log.incomingMessage.replace(/"/g, '""')}"`,
+          `"${log.botReply.replace(/"/g, '""')}"`,
+          format(new Date(log.timestamp), "yyyy-MM-dd HH:mm:ss"),
+        ]),
+      ].map((row) => row.join(",")).join("\n")
+
+      const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" })
+      const link = document.createElement("a")
+      const url = URL.createObjectURL(blob)
+      link.setAttribute("href", url)
+      link.setAttribute("download", `whatsapp-conversations-${format(new Date(), "yyyy-MM-dd")}.csv`)
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+    } catch (error) {
+      console.error(error)
+    }
   }
 
   return (
-    <Card className="bg-card border-border shadow-xl">
+    <Card className="bg-black border border-gray-800">
       <CardHeader className="pb-4">
         <div className="flex items-center justify-between">
-          <CardTitle className="text-lg font-semibold text-card-foreground flex items-center gap-2">
-            <QrCode className="w-5 h-5 text-blue-500" />
-            WhatsApp Connection
+          <CardTitle className="text-lg font-semibold text-white flex items-center gap-2">
+            <MessageSquare className="w-5 h-5" />
+            WhatsApp Conversations
           </CardTitle>
-          {getStatusBadge()}
+          <Button
+            onClick={downloadLogs}
+            size="sm"
+            variant="outline"
+            className="h-8 bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700 flex items-center gap-2"
+          >
+            <Download className="w-4 h-4" />
+            Export CSV
+          </Button>
         </div>
-        <p className="text-sm text-muted-foreground mt-2">{statusMessage}</p>
       </CardHeader>
-      <CardContent className="space-y-6">
-        {isConnected ? (
-          <div className="space-y-6">
-            <div className="flex justify-center">
-              <div className="relative">
-                <div
-                  className={`w-20 h-20 rounded-full flex items-center justify-center shadow-2xl transition-all duration-500 hover:scale-110`}
-                  style={{
-                    backgroundColor: isPaused ? "#f97316" : "#25D366", // WhatsApp green or orange for paused
-                    boxShadow: isPaused
-                      ? "0 0 30px rgba(249, 115, 22, 0.4), 0 0 60px rgba(249, 115, 22, 0.2)"
-                      : "0 0 30px rgba(37, 211, 102, 0.4), 0 0 60px rgba(37, 211, 102, 0.2)",
-                  }}
-                >
-                  {isPaused ? (
-                    <Pause className="w-8 h-8 text-white drop-shadow-lg" />
-                  ) : (
-                    <CheckCircle className="w-8 h-8 text-white drop-shadow-lg" />
-                  )}
-                </div>
-                <div
-                  className="absolute inset-0 w-20 h-20 rounded-full animate-ping opacity-30"
-                  style={{
-                    backgroundColor: isPaused ? "#f97316" : "#25D366",
-                  }}
-                />
-                <div
-                  className="absolute inset-0 w-20 h-20 rounded-full animate-pulse opacity-20"
-                  style={{
-                    backgroundColor: isPaused ? "#f97316" : "#25D366",
-                  }}
-                />
-              </div>
-            </div>
 
-            <div className="text-center space-y-2">
-              <h3 className="text-xl font-bold text-card-foreground">{isPaused ? "Bot Paused" : "Session Active"}</h3>
-              <p className="text-muted-foreground text-sm leading-relaxed">
-                {isPaused
-                  ? "Bot is paused and won't respond to messages until resumed"
-                  : "WhatsApp Web is connected and ready to send messages"}
-              </p>
-            </div>
+      <CardContent className="space-y-4">
+        {/* Search */}
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
+          <Input
+            placeholder="Search conversations..."
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            className="pl-10 bg-gray-800 border-gray-700 text-white placeholder-gray-400"
+          />
+        </div>
 
-            {deviceInfo && (
-              <div className="bg-secondary rounded-xl p-4 border border-border hover:border-accent/50 hover:shadow-lg transition-all duration-300">
-                <div className="flex items-center gap-3 mb-3">
-                  <Smartphone className="w-5 h-5 text-accent" />
-                  <span className="text-secondary-foreground font-medium">Connected Device</span>
-                </div>
-                <div className="space-y-1">
-                  <div className="text-lg font-semibold text-card-foreground">
-                    {deviceInfo.name || "Unknown Device"}
-                  </div>
-                  <div className="text-sm text-muted-foreground">
-                    {deviceInfo.platform && `${deviceInfo.platform}`}
-                    {deviceInfo.phone && ` • ${deviceInfo.phone}`}
-                  </div>
-                </div>
+        {/* Stats Grid */}
+        <div className="flex justify-between p-4 bg-gray-900 rounded-lg text-center">
+          <div className="flex-1">
+            <p className="text-lg font-semibold text-white">{stats.total ?? 0}</p>
+            <p className="text-xs text-gray-300">Total</p>
+          </div>
+          <div className="flex-1">
+            <p className="text-lg font-semibold text-red-500">{stats.badWords ?? 0}</p>
+            <p className="text-xs text-gray-300">Bad Words</p>
+          </div>
+          <div className="flex-1">
+            <p className="text-lg font-semibold text-green-500">{stats.positive ?? 0}</p>
+            <p className="text-xs text-gray-300">Positive</p>
+          </div>
+          <div className="flex-1">
+            <p className="text-lg font-semibold text-blue-500">{stats.today ?? 0}</p>
+            <p className="text-xs text-gray-300">Today</p>
+          </div>
+        </div>
+
+        {/* Table */}
+        <div className="border border-gray-700 rounded-lg bg-black">
+          <ScrollArea className="h-96">
+            {isLoading ? (
+              <div className="flex items-center justify-center h-32">
+                <div className="w-6 h-6 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
+                <span className="ml-2 text-gray-300">Loading conversations...</span>
               </div>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow className="border-b border-gray-700">
+                    <TableHead className="text-white font-semibold">Phone Number</TableHead>
+                    <TableHead className="text-white font-semibold">Incoming Message</TableHead>
+                    <TableHead className="text-white font-semibold">Bot Reply</TableHead>
+                    <TableHead className="text-white font-semibold">Timestamp</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {filteredLogs.map((log) => (
+                    <TableRow key={log.id} className="hover:bg-gray-800 border-b border-gray-800">
+                      <TableCell className="font-mono text-sm font-medium text-white">{log.phoneNumber}</TableCell>
+                      <TableCell className="max-w-xs">
+                        <div className="bg-gray-700 rounded-lg px-3 py-2">
+                          <p className="text-sm truncate text-white" title={log.incomingMessage}>{log.incomingMessage}</p>
+                        </div>
+                      </TableCell>
+                      <TableCell className="max-w-xs">
+                        <div className="flex items-center gap-2">
+                          <ArrowRight className="w-4 h-4 text-gray-400 flex-shrink-0" />
+                          <div className="rounded-lg px-3 py-2 max-w-full" style={{ backgroundColor: "#25D366" }}>
+                            <p className="text-sm truncate text-white" title={log.botReply}>{log.botReply}</p>
+                          </div>
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-sm text-gray-300">{format(log.timestamp, "MMM dd, HH:mm")}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
             )}
+          </ScrollArea>
+        </div>
 
-            <div className="flex gap-3">
-              <Button
-                onClick={handleResetSession}
-                variant="outline"
-                className="flex-1 bg-destructive/10 border-destructive/30 text-destructive hover:bg-destructive/20 hover:border-destructive/50 transition-all duration-300"
-              >
-                <Square className="w-4 h-4 mr-2" />
-                Reset Session
-              </Button>
-
-              <Button
-                onClick={handlePauseResume}
-                variant="outline"
-                size="sm"
-                className="flex-1 transition-all duration-300 bg-transparent"
-                style={{
-                  backgroundColor: isPaused ? "rgba(37, 211, 102, 0.1)" : "rgba(249, 115, 22, 0.1)",
-                  borderColor: isPaused ? "rgba(37, 211, 102, 0.3)" : "rgba(249, 115, 22, 0.3)",
-                  color: isPaused ? "#25D366" : "#f97316",
-                }}
-              >
-                {isPaused ? (
-                  <>
-                    <Play className="w-4 h-4 mr-2" />
-                    Resume Bot
-                  </>
-                ) : (
-                  <>
-                    <Pause className="w-4 h-4 mr-2" />
-                    Pause Bot
-                  </>
-                )}
-              </Button>
-            </div>
+        {filteredLogs.length === 0 && !isLoading && (
+          <div className="text-center py-8 text-gray-300">
+            <MessageSquare className="w-12 h-12 mx-auto mb-4 opacity-50" />
+            <p>No conversations found matching your criteria.</p>
           </div>
-        ) : qrImageUrl ? (
-          <div className="space-y-6">
-            <div className="text-center space-y-3">
-              <h2 className="text-xl font-bold text-card-foreground">Scan QR Code</h2>
-              <p className="text-muted-foreground text-sm leading-relaxed">
-                Open WhatsApp on your phone and scan this code to connect
-              </p>
-            </div>
-
-            <div className="flex justify-center">
-              <div className="p-6 bg-white rounded-2xl shadow-2xl border-4 border-border hover:shadow-accent/20 transition-all duration-300">
-                <img src={qrImageUrl || "/placeholder.svg"} alt="WhatsApp QR Code" className="w-48 h-48 rounded-lg" />
-              </div>
-            </div>
-
-            <Button
-              onClick={handleRefresh}
-              disabled={isRefreshing}
-              variant="outline"
-              size="sm"
-              className="w-full bg-secondary border-border text-secondary-foreground hover:bg-accent hover:text-accent-foreground hover:border-accent/50 transition-all duration-300"
-            >
-              {isRefreshing ? (
-                <>
-                  <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
-                  Refreshing...
-                </>
-              ) : (
-                <>
-                  <RefreshCw className="w-4 h-4 mr-2" />
-                  Refresh QR Code
-                </>
-              )}
-            </Button>
-          </div>
-        ) : null}
+        )}
       </CardContent>
     </Card>
   )
